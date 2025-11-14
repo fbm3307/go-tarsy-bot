@@ -1,0 +1,963 @@
+package agents
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/codeready/go-tarsy-bot/internal/config"
+	"github.com/codeready/go-tarsy-bot/internal/models"
+)
+
+// DynamicAgentRegistry extends the base AgentRegistry with dynamic capabilities
+// including hot-reload, configuration watching, and runtime agent lifecycle management
+type DynamicAgentRegistry struct {
+	// Embed the base registry
+	*AgentRegistry
+
+	// Dynamic functionality
+	configWatcher    *ConfigWatcher
+	agentLoader      *config.AgentLoader
+	dynamicAgents    map[string]Agent
+	agentConfigs     map[string]*config.AgentConfig
+
+	// Configuration and watching
+	configFile       string
+	configDirectory  string
+	watchEnabled     bool
+	autoReload       bool
+	reloadInterval   time.Duration
+
+	// Event handling and lifecycle
+	eventHandlers    map[RegistryEventType][]RegistryEventHandler
+	lifecycleManager *AgentLifecycleManager
+	healthChecker    *AgentHealthChecker
+
+	// Statistics and monitoring
+	registrationStats *RegistrationStatistics
+	lastReload        time.Time
+	totalReloads      int64
+	failedReloads     int64
+
+	// Hooks and callbacks
+	preRegistrationHooks  []PreRegistrationHook
+	postRegistrationHooks []PostRegistrationHook
+	preUnregisterHooks    []PreUnregisterHook
+	postUnregisterHooks   []PostUnregisterHook
+
+	// Additional mutex for dynamic operations
+	dynamicMutex sync.RWMutex
+}
+
+// RegistryEventType represents different types of registry events
+type RegistryEventType string
+
+const (
+	EventAgentRegistered   RegistryEventType = "agent_registered"
+	EventAgentUnregistered RegistryEventType = "agent_unregistered"
+	EventAgentUpdated      RegistryEventType = "agent_updated"
+	EventConfigReloaded    RegistryEventType = "config_reloaded"
+	EventRegistryStarted   RegistryEventType = "registry_started"
+	EventRegistryStopped   RegistryEventType = "registry_stopped"
+	EventHealthCheckFailed RegistryEventType = "health_check_failed"
+)
+
+// RegistryEvent represents an event in the agent registry
+type RegistryEvent struct {
+	Type      RegistryEventType      `json:"type"`
+	AgentName string                 `json:"agent_name,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+	Data      map[string]interface{} `json:"data,omitempty"`
+	Error     error                  `json:"error,omitempty"`
+}
+
+// RegistryEventHandler is a function that handles registry events
+type RegistryEventHandler func(event *RegistryEvent)
+
+// Hook types for extending registry functionality
+type PreRegistrationHook func(agentConfig *config.AgentConfig) error
+type PostRegistrationHook func(agent Agent) error
+type PreUnregisterHook func(agent Agent) error
+type PostUnregisterHook func(agentName string) error
+
+// RegistrationStatistics tracks registry operation statistics
+type RegistrationStatistics struct {
+	TotalAgents          int                            `json:"total_agents"`
+	DynamicAgents        int                            `json:"dynamic_agents"`
+	HardcodedAgents      int                            `json:"hardcoded_agents"`
+	AgentsByType         map[string]int                 `json:"agents_by_type"`
+	AlertTypeCoverage    map[string][]string            `json:"alert_type_coverage"`
+	RegistrationHistory  []*RegistrationRecord          `json:"registration_history"`
+	HealthStatus         map[string]*AgentHealthStatus  `json:"health_status"`
+	LastUpdate           time.Time                      `json:"last_update"`
+}
+
+// RegistrationRecord tracks individual agent registration events
+type RegistrationRecord struct {
+	AgentName    string                 `json:"agent_name"`
+	AgentType    string                 `json:"agent_type"`
+	Action       string                 `json:"action"` // "register", "unregister", "update"
+	Timestamp    time.Time              `json:"timestamp"`
+	Success      bool                   `json:"success"`
+	Error        string                 `json:"error,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// AgentHealthStatus represents the health status of an agent
+type AgentHealthStatus struct {
+	IsHealthy        bool                   `json:"is_healthy"`
+	LastHealthCheck  time.Time              `json:"last_health_check"`
+	HealthScore      float64                `json:"health_score"`
+	ErrorCount       int                    `json:"error_count"`
+	ConsecutiveErrors int                   `json:"consecutive_errors"`
+	LastError        string                 `json:"last_error,omitempty"`
+	Metrics          map[string]interface{} `json:"metrics,omitempty"`
+}
+
+// NewDynamicAgentRegistry creates a new dynamic agent registry
+func NewDynamicAgentRegistry(baseRegistry *AgentRegistry, logger *zap.Logger, options ...DynamicRegistryOption) *DynamicAgentRegistry {
+	registry := &DynamicAgentRegistry{
+		AgentRegistry:   baseRegistry,
+		agentLoader:     config.NewAgentLoader(logger),
+		dynamicAgents:   make(map[string]Agent),
+		agentConfigs:    make(map[string]*config.AgentConfig),
+		watchEnabled:    true,
+		autoReload:      true,
+		reloadInterval:  30 * time.Second,
+		eventHandlers:   make(map[RegistryEventType][]RegistryEventHandler),
+		registrationStats: &RegistrationStatistics{
+			AgentsByType:         make(map[string]int),
+			AlertTypeCoverage:    make(map[string][]string),
+			RegistrationHistory:  make([]*RegistrationRecord, 0),
+			HealthStatus:         make(map[string]*AgentHealthStatus),
+			LastUpdate:           time.Now(),
+		},
+		preRegistrationHooks:  make([]PreRegistrationHook, 0),
+		postRegistrationHooks: make([]PostRegistrationHook, 0),
+		preUnregisterHooks:    make([]PreUnregisterHook, 0),
+		postUnregisterHooks:   make([]PostUnregisterHook, 0),
+	}
+
+	// Apply options
+	for _, option := range options {
+		option(registry)
+	}
+
+	// Initialize lifecycle manager and health checker
+	registry.lifecycleManager = NewAgentLifecycleManager(registry, logger)
+	registry.healthChecker = NewAgentHealthChecker(registry, logger)
+
+	return registry
+}
+
+// DynamicRegistryOption represents a configuration option for the dynamic registry
+type DynamicRegistryOption func(*DynamicAgentRegistry)
+
+// WithConfigFile sets the configuration file path
+func WithConfigFile(configFile string) DynamicRegistryOption {
+	return func(r *DynamicAgentRegistry) {
+		r.configFile = configFile
+	}
+}
+
+// WithConfigDirectory sets the configuration directory path
+func WithConfigDirectory(configDirectory string) DynamicRegistryOption {
+	return func(r *DynamicAgentRegistry) {
+		r.configDirectory = configDirectory
+	}
+}
+
+// WithWatchEnabled enables or disables configuration watching
+func WithWatchEnabled(enabled bool) DynamicRegistryOption {
+	return func(r *DynamicAgentRegistry) {
+		r.watchEnabled = enabled
+	}
+}
+
+// WithAutoReload enables or disables automatic reloading
+func WithAutoReload(enabled bool) DynamicRegistryOption {
+	return func(r *DynamicAgentRegistry) {
+		r.autoReload = enabled
+	}
+}
+
+// WithReloadInterval sets the reload interval
+func WithReloadInterval(interval time.Duration) DynamicRegistryOption {
+	return func(r *DynamicAgentRegistry) {
+		r.reloadInterval = interval
+	}
+}
+
+// Start initializes the dynamic registry and begins configuration watching
+func (dar *DynamicAgentRegistry) Start(ctx context.Context) error {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	dar.logger.Info("Starting dynamic agent registry")
+
+	// Load initial configuration
+	if err := dar.loadDynamicConfiguration(); err != nil {
+		return fmt.Errorf("failed to load initial configuration: %w", err)
+	}
+
+	// Start configuration watcher if enabled
+	if dar.watchEnabled {
+		if err := dar.startConfigWatcher(ctx); err != nil {
+			dar.logger.Warn("Failed to start configuration watcher", zap.Error(err))
+		}
+	}
+
+	// Start health checker
+	if err := dar.healthChecker.Start(ctx); err != nil {
+		dar.logger.Warn("Failed to start health checker", zap.Error(err))
+	}
+
+	// Emit registry started event
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventRegistryStarted,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"total_dynamic_agents": len(dar.dynamicAgents),
+			"config_file":          dar.configFile,
+			"config_dir":           dar.configDirectory,
+		},
+	})
+
+	dar.logger.Info("Dynamic agent registry started successfully",
+		zap.Int("dynamic_agents", len(dar.dynamicAgents)),
+		zap.Bool("watch_enabled", dar.watchEnabled))
+
+	return nil
+}
+
+// Stop gracefully shuts down the dynamic registry
+func (dar *DynamicAgentRegistry) Stop(ctx context.Context) error {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	dar.logger.Info("Stopping dynamic agent registry")
+
+	// Stop configuration watcher
+	if dar.configWatcher != nil {
+		dar.configWatcher.Stop()
+	}
+
+	// Stop health checker
+	if dar.healthChecker != nil {
+		dar.healthChecker.Stop(ctx)
+	}
+
+	// Stop all dynamic agents
+	for name, agent := range dar.dynamicAgents {
+		if err := agent.Stop(ctx); err != nil {
+			dar.logger.Warn("Failed to stop dynamic agent", zap.String("agent", name), zap.Error(err))
+		}
+	}
+
+	// Emit registry stopped event
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventRegistryStopped,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"dynamic_agents_stopped": len(dar.dynamicAgents),
+		},
+	})
+
+	dar.logger.Info("Dynamic agent registry stopped successfully")
+	return nil
+}
+
+// RegisterDynamicAgent registers a new agent dynamically
+func (dar *DynamicAgentRegistry) RegisterDynamicAgent(agent Agent) error {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	name := agent.GetName()
+	if name == "" {
+		return fmt.Errorf("agent name cannot be empty")
+	}
+
+	dar.logger.Debug("Registering dynamic agent", zap.String("name", name), zap.String("type", agent.GetType()))
+
+	// Check for conflicts in both base registry and dynamic agents
+	if _, err := dar.AgentRegistry.GetAgent(name); err == nil {
+		return fmt.Errorf("agent with name '%s' already exists in base registry", name)
+	}
+
+	if existing, exists := dar.dynamicAgents[name]; exists {
+		return fmt.Errorf("dynamic agent with name '%s' already exists (type: %s)", name, existing.GetType())
+	}
+
+	// Execute pre-registration hooks
+	if len(dar.preRegistrationHooks) > 0 {
+		// For dynamically registered agents, create a minimal config
+		agentConfig := &config.AgentConfig{
+			Name:        agent.GetName(),
+			Type:        agent.GetType(),
+			Description: agent.GetDescription(),
+			AlertTypes:  agent.GetAlertTypes(),
+			MCPServers:  agent.GetMCPServers(),
+		}
+
+		for _, hook := range dar.preRegistrationHooks {
+			if err := hook(agentConfig); err != nil {
+				return fmt.Errorf("pre-registration hook failed for agent '%s': %w", name, err)
+			}
+		}
+	}
+
+	// Register the agent
+	dar.dynamicAgents[name] = agent
+
+	// Update statistics
+	dar.updateRegistrationStats(name, agent, "register", true, nil)
+
+	// Start the agent
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := agent.Start(ctx); err != nil {
+		dar.logger.Warn("Failed to start dynamic agent", zap.String("agent", name), zap.Error(err))
+	}
+
+	// Execute post-registration hooks
+	for _, hook := range dar.postRegistrationHooks {
+		if err := hook(agent); err != nil {
+			dar.logger.Warn("Post-registration hook failed",
+				zap.String("agent", name),
+				zap.Error(err))
+		}
+	}
+
+	// Emit event
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventAgentRegistered,
+		AgentName: name,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"agent_type":   agent.GetType(),
+			"alert_types":  agent.GetAlertTypes(),
+			"mcp_servers":  agent.GetMCPServers(),
+			"capabilities": agent.GetCapabilities(),
+		},
+	})
+
+	dar.logger.Info("Dynamic agent registered successfully",
+		zap.String("name", name),
+		zap.String("type", agent.GetType()),
+		zap.Strings("alert_types", agent.GetAlertTypes()))
+
+	return nil
+}
+
+// UnregisterDynamicAgent removes a dynamic agent from the registry
+func (dar *DynamicAgentRegistry) UnregisterDynamicAgent(name string) error {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	agent, exists := dar.dynamicAgents[name]
+	if !exists {
+		return fmt.Errorf("dynamic agent '%s' not found", name)
+	}
+
+	dar.logger.Debug("Unregistering dynamic agent", zap.String("name", name))
+
+	// Execute pre-unregister hooks
+	for _, hook := range dar.preUnregisterHooks {
+		if err := hook(agent); err != nil {
+			return fmt.Errorf("pre-unregister hook failed for agent '%s': %w", name, err)
+		}
+	}
+
+	// Stop the agent
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := agent.Stop(ctx); err != nil {
+		dar.logger.Warn("Failed to stop dynamic agent during unregistration",
+			zap.String("agent", name),
+			zap.Error(err))
+	}
+
+	// Remove from registry
+	delete(dar.dynamicAgents, name)
+	delete(dar.agentConfigs, name)
+	delete(dar.registrationStats.HealthStatus, name)
+
+	// Update statistics
+	dar.updateRegistrationStats(name, agent, "unregister", true, nil)
+
+	// Execute post-unregister hooks
+	for _, hook := range dar.postUnregisterHooks {
+		if err := hook(name); err != nil {
+			dar.logger.Warn("Post-unregister hook failed",
+				zap.String("agent", name),
+				zap.Error(err))
+		}
+	}
+
+	// Emit event
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventAgentUnregistered,
+		AgentName: name,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"agent_type": agent.GetType(),
+		},
+	})
+
+	dar.logger.Info("Dynamic agent unregistered successfully", zap.String("name", name))
+	return nil
+}
+
+// GetDynamicAgent retrieves a dynamic agent by name
+func (dar *DynamicAgentRegistry) GetDynamicAgent(name string) (Agent, bool) {
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	agent, exists := dar.dynamicAgents[name]
+	return agent, exists
+}
+
+// GetAgentForAlertWithDynamic extends the base registry's GetAgentForAlert to include dynamic agents
+func (dar *DynamicAgentRegistry) GetAgentForAlertWithDynamic(alert *models.Alert) (Agent, error) {
+	// First try the base registry
+	agent, err := dar.AgentRegistry.GetAgentForAlert(alert)
+	if err == nil {
+		return agent, nil
+	}
+
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	// Check dynamic agents for the alert type
+	for _, dynamicAgent := range dar.dynamicAgents {
+		for _, alertType := range dynamicAgent.GetAlertTypes() {
+			if alertType == alert.AlertType {
+				dar.logger.Info("Using dynamic agent for alert",
+					zap.String("agent", dynamicAgent.GetName()),
+					zap.String("alert_type", alert.AlertType))
+				return dynamicAgent, nil
+			}
+		}
+	}
+
+	// Check if any dynamic agent can handle the alert via CanHandleAlert method
+	for _, dynamicAgent := range dar.dynamicAgents {
+		if dynamicAgent.CanHandleAlert(alert) {
+			dar.logger.Info("Using dynamic agent based on CanHandleAlert",
+				zap.String("agent", dynamicAgent.GetName()),
+				zap.String("alert_type", alert.AlertType))
+			return dynamicAgent, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no suitable agent found for alert type: %s (checked base and dynamic registries)", alert.AlertType)
+}
+
+// ListAllAgents returns all agents including dynamic ones
+func (dar *DynamicAgentRegistry) ListAllAgents() []string {
+	baseAgents := dar.AgentRegistry.ListAgents()
+
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	// Add dynamic agents
+	for name := range dar.dynamicAgents {
+		baseAgents = append(baseAgents, fmt.Sprintf("%s (dynamic)", name))
+	}
+
+	return baseAgents
+}
+
+// ListDynamicAgents returns all dynamic agents
+func (dar *DynamicAgentRegistry) ListDynamicAgents() []Agent {
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	agents := make([]Agent, 0, len(dar.dynamicAgents))
+	for _, agent := range dar.dynamicAgents {
+		agents = append(agents, agent)
+	}
+
+	return agents
+}
+
+// ReloadDynamicConfiguration reloads the dynamic agent configuration from files
+func (dar *DynamicAgentRegistry) ReloadDynamicConfiguration() error {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	dar.logger.Info("Reloading dynamic agent configuration")
+
+	if err := dar.loadDynamicConfiguration(); err != nil {
+		dar.failedReloads++
+		dar.emitEvent(&RegistryEvent{
+			Type:      EventConfigReloaded,
+			Timestamp: time.Now(),
+			Error:     err,
+			Data: map[string]interface{}{
+				"success": false,
+			},
+		})
+		return fmt.Errorf("failed to reload dynamic configuration: %w", err)
+	}
+
+	dar.totalReloads++
+	dar.lastReload = time.Now()
+
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventConfigReloaded,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"success":         true,
+			"dynamic_agents": len(dar.dynamicAgents),
+		},
+	})
+
+	dar.logger.Info("Dynamic configuration reloaded successfully",
+		zap.Int("dynamic_agents", len(dar.dynamicAgents)),
+		zap.Int64("total_reloads", dar.totalReloads))
+
+	return nil
+}
+
+// GetDynamicStatistics returns current dynamic registry statistics
+func (dar *DynamicAgentRegistry) GetDynamicStatistics() *RegistrationStatistics {
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	// Update current statistics
+	dar.registrationStats.TotalAgents = len(dar.dynamicAgents)
+	dar.registrationStats.DynamicAgents = len(dar.dynamicAgents)
+	dar.registrationStats.LastUpdate = time.Now()
+
+	// Recalculate agents by type
+	dar.registrationStats.AgentsByType = make(map[string]int)
+	for _, agent := range dar.dynamicAgents {
+		dar.registrationStats.AgentsByType[agent.GetType()]++
+	}
+
+	// Update alert type coverage
+	dar.registrationStats.AlertTypeCoverage = make(map[string][]string)
+	for _, agent := range dar.dynamicAgents {
+		for _, alertType := range agent.GetAlertTypes() {
+			dar.registrationStats.AlertTypeCoverage[alertType] = append(
+				dar.registrationStats.AlertTypeCoverage[alertType], agent.GetName())
+		}
+	}
+
+	// Return a copy to avoid race conditions
+	statsCopy := *dar.registrationStats
+	return &statsCopy
+}
+
+// GetCombinedStatistics returns statistics for both base and dynamic registries
+func (dar *DynamicAgentRegistry) GetCombinedStatistics() map[string]interface{} {
+	baseMetrics := dar.AgentRegistry.GetAgentMetrics()
+	dynamicStats := dar.GetDynamicStatistics()
+
+	return map[string]interface{}{
+		"base_registry":    baseMetrics,
+		"dynamic_registry": dynamicStats,
+		"combined_totals": map[string]interface{}{
+			"total_agents":     dynamicStats.TotalAgents + baseMetrics["registry_stats"].(map[string]interface{})["total_agents"].(int),
+			"dynamic_agents":   dynamicStats.DynamicAgents,
+			"hardcoded_agents": baseMetrics["registry_stats"].(map[string]interface{})["hardcoded_agents"].(int),
+			"configured_agents": baseMetrics["registry_stats"].(map[string]interface{})["configured_agents"].(int),
+		},
+	}
+}
+
+// Supporting methods
+
+func (dar *DynamicAgentRegistry) loadDynamicConfiguration() error {
+	var allConfigs []*config.AgentConfig
+	var err error
+
+	// Load from file if specified
+	if dar.configFile != "" {
+		configs, err := dar.agentLoader.LoadAgentsFromFile(dar.configFile)
+		if err != nil {
+			return fmt.Errorf("failed to load from file %s: %w", dar.configFile, err)
+		}
+		allConfigs = append(allConfigs, configs...)
+		dar.logger.Debug("Loaded dynamic agents from file",
+			zap.String("file", dar.configFile),
+			zap.Int("count", len(configs)))
+	}
+
+	// Load from directory if specified
+	if dar.configDirectory != "" {
+		configs, err := dar.agentLoader.LoadAgentsFromDirectory(dar.configDirectory)
+		if err != nil {
+			return fmt.Errorf("failed to load from directory %s: %w", dar.configDirectory, err)
+		}
+		allConfigs = append(allConfigs, configs...)
+		dar.logger.Debug("Loaded dynamic agents from directory",
+			zap.String("directory", dar.configDirectory),
+			zap.Int("count", len(configs)))
+	}
+
+	// Register configuration-based agents
+	for _, agentConfig := range allConfigs {
+		if err := dar.registerDynamicConfigBasedAgent(agentConfig); err != nil {
+			dar.logger.Error("Failed to register dynamic config-based agent",
+				zap.String("agent", agentConfig.Name),
+				zap.Error(err))
+			continue
+		}
+	}
+
+	dar.logger.Info("Dynamic configuration loaded successfully",
+		zap.Int("total_dynamic_config_agents", len(allConfigs)))
+
+	return nil
+}
+
+func (dar *DynamicAgentRegistry) registerDynamicConfigBasedAgent(agentConfig *config.AgentConfig) error {
+	// Check if agent already exists
+	if existing, exists := dar.dynamicAgents[agentConfig.Name]; exists {
+		// Update existing agent
+		return dar.updateDynamicConfigBasedAgent(agentConfig, existing)
+	}
+
+	// Create new configurable agent
+	agent, err := NewConfigurableAgent(agentConfig, dar.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create configurable agent: %w", err)
+	}
+
+	// Store the configuration
+	dar.agentConfigs[agentConfig.Name] = agentConfig
+
+	// Register the agent internally
+	return dar.registerDynamicAgentInternal(agent)
+}
+
+func (dar *DynamicAgentRegistry) updateDynamicConfigBasedAgent(agentConfig *config.AgentConfig, existingAgent Agent) error {
+	// Update the configuration
+	dar.agentConfigs[agentConfig.Name] = agentConfig
+
+	// If the agent supports configuration updates, use that
+	if err := existingAgent.UpdateConfiguration(agentConfig.Configuration); err != nil {
+		dar.logger.Warn("Failed to update dynamic agent configuration, will restart agent",
+			zap.String("agent", agentConfig.Name),
+			zap.Error(err))
+
+		// Restart the agent
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := existingAgent.Restart(ctx); err != nil {
+			return fmt.Errorf("failed to restart dynamic agent after configuration update: %w", err)
+		}
+	}
+
+	// Emit update event
+	dar.emitEvent(&RegistryEvent{
+		Type:      EventAgentUpdated,
+		AgentName: agentConfig.Name,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"alert_types": agentConfig.AlertTypes,
+			"mcp_servers": agentConfig.MCPServers,
+		},
+	})
+
+	dar.logger.Info("Dynamic agent configuration updated",
+		zap.String("agent", agentConfig.Name))
+
+	return nil
+}
+
+func (dar *DynamicAgentRegistry) registerDynamicAgentInternal(agent Agent) error {
+	name := agent.GetName()
+
+	// Register the agent
+	dar.dynamicAgents[name] = agent
+
+	// Update statistics
+	dar.updateRegistrationStats(name, agent, "register", true, nil)
+
+	// Start the agent
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := agent.Start(ctx); err != nil {
+		dar.logger.Warn("Failed to start dynamic agent", zap.String("agent", name), zap.Error(err))
+	}
+
+	return nil
+}
+
+func (dar *DynamicAgentRegistry) updateRegistrationStats(agentName string, agent Agent, action string, success bool, err error) {
+	record := &RegistrationRecord{
+		AgentName: agentName,
+		AgentType: agent.GetType(),
+		Action:    action,
+		Timestamp: time.Now(),
+		Success:   success,
+		Metadata: map[string]interface{}{
+			"alert_types": agent.GetAlertTypes(),
+			"mcp_servers": agent.GetMCPServers(),
+		},
+	}
+
+	if err != nil {
+		record.Error = err.Error()
+	}
+
+	dar.registrationStats.RegistrationHistory = append(dar.registrationStats.RegistrationHistory, record)
+
+	// Keep only the last 100 records
+	if len(dar.registrationStats.RegistrationHistory) > 100 {
+		dar.registrationStats.RegistrationHistory = dar.registrationStats.RegistrationHistory[1:]
+	}
+}
+
+func (dar *DynamicAgentRegistry) emitEvent(event *RegistryEvent) {
+	if handlers, exists := dar.eventHandlers[event.Type]; exists {
+		for _, handler := range handlers {
+			go func(h RegistryEventHandler, e *RegistryEvent) {
+				defer func() {
+					if r := recover(); r != nil {
+						dar.logger.Error("Event handler panicked",
+							zap.String("event_type", string(e.Type)),
+							zap.Any("panic", r))
+					}
+				}()
+				h(e)
+			}(handler, event)
+		}
+	}
+}
+
+func (dar *DynamicAgentRegistry) startConfigWatcher(ctx context.Context) error {
+	watchPaths := make([]string, 0)
+
+	if dar.configFile != "" {
+		watchPaths = append(watchPaths, dar.configFile)
+	}
+
+	if dar.configDirectory != "" {
+		// Watch all YAML files in the directory
+		yamlFiles, err := filepath.Glob(filepath.Join(dar.configDirectory, "*.yaml"))
+		if err != nil {
+			return fmt.Errorf("failed to glob YAML files: %w", err)
+		}
+		ymlFiles, err := filepath.Glob(filepath.Join(dar.configDirectory, "*.yml"))
+		if err != nil {
+			return fmt.Errorf("failed to glob YML files: %w", err)
+		}
+		watchPaths = append(watchPaths, yamlFiles...)
+		watchPaths = append(watchPaths, ymlFiles...)
+	}
+
+	if len(watchPaths) == 0 {
+		return fmt.Errorf("no configuration files to watch")
+	}
+
+	watcher, err := NewConfigWatcher(watchPaths, dar.reloadInterval, dar.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create config watcher: %w", err)
+	}
+
+	dar.configWatcher = watcher
+
+	// Start watching in a goroutine
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-watcher.Changes():
+				if dar.autoReload {
+					dar.logger.Info("Dynamic configuration change detected, reloading...")
+					if err := dar.ReloadDynamicConfiguration(); err != nil {
+						dar.logger.Error("Failed to reload dynamic configuration", zap.Error(err))
+					}
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// Public API methods for event handling and hooks
+
+// AddEventHandler adds an event handler for a specific event type
+func (dar *DynamicAgentRegistry) AddEventHandler(eventType RegistryEventType, handler RegistryEventHandler) {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+
+	if dar.eventHandlers[eventType] == nil {
+		dar.eventHandlers[eventType] = make([]RegistryEventHandler, 0)
+	}
+	dar.eventHandlers[eventType] = append(dar.eventHandlers[eventType], handler)
+}
+
+// AddPreRegistrationHook adds a hook that executes before agent registration
+func (dar *DynamicAgentRegistry) AddPreRegistrationHook(hook PreRegistrationHook) {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+	dar.preRegistrationHooks = append(dar.preRegistrationHooks, hook)
+}
+
+// AddPostRegistrationHook adds a hook that executes after agent registration
+func (dar *DynamicAgentRegistry) AddPostRegistrationHook(hook PostRegistrationHook) {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+	dar.postRegistrationHooks = append(dar.postRegistrationHooks, hook)
+}
+
+// AddPreUnregisterHook adds a hook that executes before agent unregistration
+func (dar *DynamicAgentRegistry) AddPreUnregisterHook(hook PreUnregisterHook) {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+	dar.preUnregisterHooks = append(dar.preUnregisterHooks, hook)
+}
+
+// AddPostUnregisterHook adds a hook that executes after agent unregistration
+func (dar *DynamicAgentRegistry) AddPostUnregisterHook(hook PostUnregisterHook) {
+	dar.dynamicMutex.Lock()
+	defer dar.dynamicMutex.Unlock()
+	dar.postUnregisterHooks = append(dar.postUnregisterHooks, hook)
+}
+
+// DiscoverAgents scans the system for available agents and registers them
+func (dar *DynamicAgentRegistry) DiscoverAgents(discoveryPaths []string) error {
+	dar.logger.Info("Starting agent discovery", zap.Strings("paths", discoveryPaths))
+
+	discovered := 0
+	for _, path := range discoveryPaths {
+		agents, err := dar.discoverAgentsInPath(path)
+		if err != nil {
+			dar.logger.Warn("Failed to discover agents in path",
+				zap.String("path", path),
+				zap.Error(err))
+			continue
+		}
+
+		for _, agent := range agents {
+			if err := dar.RegisterDynamicAgent(agent); err != nil {
+				dar.logger.Warn("Failed to register discovered agent",
+					zap.String("agent", agent.GetName()),
+					zap.Error(err))
+			} else {
+				discovered++
+			}
+		}
+	}
+
+	dar.logger.Info("Agent discovery completed",
+		zap.Int("agents_discovered", discovered))
+
+	return nil
+}
+
+func (dar *DynamicAgentRegistry) discoverAgentsInPath(path string) ([]Agent, error) {
+	// This is a placeholder for agent discovery logic
+	// In a real implementation, this might:
+	// 1. Scan for agent binaries or plugins
+	// 2. Load agent definitions from discovery files
+	// 3. Query service discovery systems
+	// 4. Check for agent registration endpoints
+
+	agents := make([]Agent, 0)
+
+	// Look for YAML configuration files
+	yamlFiles, err := filepath.Glob(filepath.Join(path, "*.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan for YAML files: %w", err)
+	}
+
+	ymlFiles, err := filepath.Glob(filepath.Join(path, "*.yml"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan for YML files: %w", err)
+	}
+
+	allFiles := append(yamlFiles, ymlFiles...)
+
+	for _, file := range allFiles {
+		configs, err := dar.agentLoader.LoadAgentsFromFile(file)
+		if err != nil {
+			dar.logger.Warn("Failed to load agent config during discovery",
+				zap.String("file", file),
+				zap.Error(err))
+			continue
+		}
+
+		for _, config := range configs {
+			agent, err := NewConfigurableAgent(config, dar.logger)
+			if err != nil {
+				dar.logger.Warn("Failed to create agent during discovery",
+					zap.String("agent", config.Name),
+					zap.Error(err))
+				continue
+			}
+
+			agents = append(agents, agent)
+		}
+	}
+
+	return agents, nil
+}
+
+// ValidateAllDynamicAgents validates all dynamic agents
+func (dar *DynamicAgentRegistry) ValidateAllDynamicAgents() error {
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	for name, agent := range dar.dynamicAgents {
+		if err := agent.ValidateConfiguration(); err != nil {
+			return fmt.Errorf("dynamic agent %s validation failed: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// GetDynamicAgentHealth returns health information for all dynamic agents
+func (dar *DynamicAgentRegistry) GetDynamicAgentHealth() map[string]interface{} {
+	dar.dynamicMutex.RLock()
+	defer dar.dynamicMutex.RUnlock()
+
+	health := map[string]interface{}{
+		"total_dynamic_agents": len(dar.dynamicAgents),
+		"healthy_agents":       0,
+		"unhealthy_agents":     0,
+		"agent_health":         make(map[string]interface{}),
+	}
+
+	healthyCount := 0
+	unhealthyCount := 0
+	agentHealth := health["agent_health"].(map[string]interface{})
+
+	for name, agent := range dar.dynamicAgents {
+		isHealthy := agent.IsHealthy()
+		if isHealthy {
+			healthyCount++
+		} else {
+			unhealthyCount++
+		}
+
+		agentHealth[name] = map[string]interface{}{
+			"is_healthy":     isHealthy,
+			"agent_type":     agent.GetType(),
+			"capabilities":   agent.GetCapabilities(),
+			"version":        agent.GetVersion(),
+			"last_check":     time.Now(),
+		}
+	}
+
+	health["healthy_agents"] = healthyCount
+	health["unhealthy_agents"] = unhealthyCount
+
+	return health
+}

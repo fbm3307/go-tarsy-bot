@@ -1,0 +1,287 @@
+# Test agents configuration for comprehensive testing
+# This file contains various agent configurations to test different scenarios
+
+agents:
+  # Basic test agent with minimal configuration
+  - name: "basic-test-agent"
+    type: "generic"
+    description: "Basic test agent for unit testing"
+    alert_types:
+      - "test.basic"
+      - "test.minimal"
+    mcp_servers:
+      - "test-server"
+    instructions:
+      system_prompt: "You are a basic test agent. Process alerts simply and efficiently."
+
+  # Kubernetes agent with comprehensive configuration
+  - name: "test-k8s-agent"
+    type: "kubernetes"
+    description: "Test Kubernetes agent with variable resolution"
+    alert_types:
+      - "kubernetes.pod.crash"
+      - "kubernetes.deployment.failed"
+      - "kubernetes.node.notready"
+    mcp_servers:
+      - "kubernetes-server"
+      - "monitoring-server"
+      - "logging-server"
+    configuration:
+      cluster_name: "${CLUSTER_NAME:test-cluster}"
+      namespace: "${NAMESPACE:default}"
+      timeout: 30
+      max_iterations: 10
+      resource_limits:
+        cpu: "500m"
+        memory: "512Mi"
+      tools:
+        - "kubectl"
+        - "helm"
+        - "prometheus"
+    instructions:
+      system_prompt: |
+        You are a Kubernetes troubleshooting expert for cluster ${CLUSTER_NAME}.
+        Focus on analyzing pod crashes, deployment failures, and node issues.
+        Always check the ${NAMESPACE} namespace first, then expand to other namespaces if needed.
+      context_instructions:
+        - "Always check pod logs first using kubectl logs"
+        - "Examine resource usage and limits"
+        - "Check for networking issues and service connectivity"
+        - "Review recent events using kubectl get events"
+        - "Analyze node conditions and capacity"
+      troubleshooting_steps:
+        - "Gather basic information about the alert"
+        - "Check pod status and recent events"
+        - "Examine logs for error patterns"
+        - "Verify resource availability"
+        - "Check networking and DNS resolution"
+        - "Provide remediation recommendations"
+
+  # Monitoring agent with complex variable resolution
+  - name: "test-monitoring-agent"
+    type: "monitoring"
+    description: "Test monitoring agent with advanced variable resolution"
+    alert_types:
+      - "prometheus.alert.firing"
+      - "grafana.dashboard.error"
+      - "monitoring.threshold.exceeded"
+    mcp_servers:
+      - "prometheus-server"
+      - "grafana-server"
+      - "alertmanager-server"
+    configuration:
+      prometheus_url: "${PROMETHEUS_URL:http://localhost:9090}"
+      grafana_url: "${GRAFANA_URL:http://localhost:3000}"
+      alertmanager_url: "${ALERTMANAGER_URL:http://localhost:9093}"
+      environment: "${ENVIRONMENT:development}"
+      region: "${AWS_REGION:us-west-2}"
+      retention_period: "${RETENTION_DAYS:30}d"
+      thresholds:
+        cpu_warning: 70
+        cpu_critical: 90
+        memory_warning: 80
+        memory_critical: 95
+        disk_warning: 85
+        disk_critical: 95
+    instructions:
+      system_prompt: |
+        You are a monitoring and alerting expert for the ${ENVIRONMENT} environment in ${AWS_REGION}.
+        Analyze Prometheus alerts, Grafana dashboards, and monitoring data.
+        Use the configured thresholds and connect to monitoring systems at:
+        - Prometheus: ${PROMETHEUS_URL}
+        - Grafana: ${GRAFANA_URL}
+        - Alertmanager: ${ALERTMANAGER_URL}
+      context_instructions:
+        - "Check alert severity and duration"
+        - "Examine time series data trends"
+        - "Correlate with other active alerts"
+        - "Review dashboard visualizations"
+        - "Identify root cause patterns"
+      analysis_framework:
+        - "Collect alert metadata and context"
+        - "Query relevant metrics from Prometheus"
+        - "Analyze trends and patterns"
+        - "Check for related alerts and incidents"
+        - "Provide actionable recommendations"
+
+  # Database agent with environment-specific configuration
+  - name: "test-database-agent"
+    type: "database"
+    description: "Test database agent with environment variables"
+    alert_types:
+      - "database.connection.failed"
+      - "database.query.slow"
+      - "database.replication.lag"
+    mcp_servers:
+      - "database-server"
+      - "metrics-server"
+    configuration:
+      database_type: "${DB_TYPE:postgresql}"
+      connection_string: "${DATABASE_URL}"
+      max_connections: "${DB_MAX_CONNECTIONS:100}"
+      query_timeout: "${DB_QUERY_TIMEOUT:30s}"
+      replication_lag_threshold: "${REPLICATION_LAG_THRESHOLD:5s}"
+      monitoring:
+        enabled: true
+        interval: "${MONITORING_INTERVAL:60s}"
+        metrics:
+          - "connection_count"
+          - "query_duration"
+          - "replication_lag"
+          - "deadlock_count"
+    instructions:
+      system_prompt: |
+        You are a ${DB_TYPE} database expert.
+        Analyze database connection issues, slow queries, and replication problems.
+        Use connection string: ${DATABASE_URL}
+        Max connections: ${DB_MAX_CONNECTIONS}
+        Query timeout: ${DB_QUERY_TIMEOUT}
+      context_instructions:
+        - "Check database connectivity and authentication"
+        - "Analyze query performance and execution plans"
+        - "Monitor replication lag and sync status"
+        - "Review database logs for errors"
+        - "Check resource utilization (CPU, memory, disk)"
+
+  # Security agent with sensitive data handling
+  - name: "test-security-agent"
+    type: "security"
+    description: "Test security agent with data masking"
+    alert_types:
+      - "security.intrusion.detected"
+      - "security.authentication.failed"
+      - "security.vulnerability.found"
+    mcp_servers:
+      - "security-server"
+      - "audit-server"
+    configuration:
+      security_level: "${SECURITY_LEVEL:high}"
+      audit_enabled: true
+      data_masking: true
+      compliance_framework: "${COMPLIANCE_FRAMEWORK:SOC2}"
+      incident_response:
+        enabled: true
+        escalation_threshold: 3
+        notification_channels:
+          - "email"
+          - "slack"
+          - "pagerduty"
+    instructions:
+      system_prompt: |
+        You are a cybersecurity expert operating at ${SECURITY_LEVEL} security level.
+        Handle security incidents, authentication failures, and vulnerability assessments.
+        Ensure compliance with ${COMPLIANCE_FRAMEWORK} requirements.
+        Always protect sensitive data and follow incident response procedures.
+      context_instructions:
+        - "Assess threat severity and impact"
+        - "Collect relevant security logs and evidence"
+        - "Identify attack patterns and indicators"
+        - "Check for lateral movement or persistence"
+        - "Follow incident response procedures"
+        - "Ensure compliance with security policies"
+
+  # Multi-environment agent with conditional logic
+  - name: "test-multi-env-agent"
+    type: "generic"
+    description: "Test agent with environment-specific behavior"
+    alert_types:
+      - "application.error"
+      - "application.performance"
+    mcp_servers:
+      - "application-server"
+      - "${ENVIRONMENT}-monitoring-server"
+    configuration:
+      environment: "${ENVIRONMENT:development}"
+      debug_mode: "${DEBUG_MODE:false}"
+      log_level: "${LOG_LEVEL:info}"
+      feature_flags:
+        experimental_features: "${ENABLE_EXPERIMENTAL:false}"
+        enhanced_logging: "${ENHANCED_LOGGING:false}"
+        performance_monitoring: "${PERF_MONITORING:true}"
+      environment_specific:
+        development:
+          timeout: 60
+          retry_count: 3
+          debug_output: true
+        staging:
+          timeout: 45
+          retry_count: 2
+          debug_output: true
+        production:
+          timeout: 30
+          retry_count: 1
+          debug_output: false
+    instructions:
+      system_prompt: |
+        You are an application support agent for the ${ENVIRONMENT} environment.
+        Debug mode: ${DEBUG_MODE}
+        Log level: ${LOG_LEVEL}
+
+        Environment-specific behavior:
+        - Development: Extended timeouts, verbose logging, experimental features
+        - Staging: Moderate timeouts, standard logging, testing features
+        - Production: Strict timeouts, minimal logging, stable features only
+      context_instructions:
+        - "Check application logs at ${LOG_LEVEL} level"
+        - "Analyze error patterns and frequency"
+        - "Monitor performance metrics and trends"
+        - "Review recent deployments and changes"
+        - "Check system resources and dependencies"
+
+  # Edge case agent with complex nested variables
+  - name: "test-edge-case-agent"
+    type: "edge-case"
+    description: "Test agent for edge cases and complex scenarios"
+    alert_types:
+      - "edge.case.test"
+    mcp_servers:
+      - "edge-case-server"
+    configuration:
+      # Test nested variable resolution
+      base_path: "${BASE_PATH:/opt/app}"
+      config_file: "${base_path}/config/${ENVIRONMENT:dev}.yaml"
+      log_file: "${base_path}/logs/${ENVIRONMENT:dev}/${SERVICE_NAME:app}.log"
+
+      # Test default values with complex expressions
+      cluster_endpoint: "${CLUSTER_PROTOCOL:https}://${CLUSTER_HOST:localhost}:${CLUSTER_PORT:8443}"
+
+      # Test array and object variables
+      supported_regions: "${SUPPORTED_REGIONS:us-west-1,us-west-2,us-east-1}"
+      database_config:
+        host: "${DB_HOST:localhost}"
+        port: "${DB_PORT:5432}"
+        database: "${DB_NAME:testdb}"
+        ssl_mode: "${DB_SSL_MODE:require}"
+
+      # Test boolean and numeric variables
+      max_retries: "${MAX_RETRIES:5}"
+      enable_ssl: "${ENABLE_SSL:true}"
+      connection_timeout: "${CONNECTION_TIMEOUT:30.5}"
+    instructions:
+      system_prompt: |
+        You are an edge case testing agent.
+        Base path: ${base_path}
+        Config file: ${config_file}
+        Log file: ${log_file}
+        Cluster: ${cluster_endpoint}
+        Regions: ${supported_regions}
+        Max retries: ${MAX_RETRIES}
+        SSL enabled: ${ENABLE_SSL}
+        Timeout: ${CONNECTION_TIMEOUT}s
+
+  # Minimal agent for validation testing
+  - name: "test-minimal-agent"
+    type: "minimal"
+    description: "Minimal agent for validation testing"
+    alert_types:
+      - "test.minimal"
+    mcp_servers:
+      - "minimal-server"
+
+  # Agent with missing required fields (for error testing)
+  - name: "test-invalid-agent-no-type"
+    description: "Invalid agent without type"
+    alert_types:
+      - "test.invalid"
+    mcp_servers:
+      - "invalid-server"

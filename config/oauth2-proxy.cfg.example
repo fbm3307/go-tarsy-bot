@@ -1,0 +1,90 @@
+# OAuth2 Proxy Configuration for TARSy-bot
+# Copy this file to oauth2-proxy.cfg and update the values for your environment
+
+# Basic Configuration
+http_address = "0.0.0.0:4180"
+upstreams = ["http://localhost:8000"]
+
+# OIDC Configuration
+provider = "oidc"
+client_id = "your_client_id_here"
+client_secret = "your_client_secret_here"
+redirect_url = "http://localhost:4180/oauth2/callback"
+oidc_issuer_url = "https://your-oidc-provider.com"
+
+# Email Configuration
+email_domains = ["*"]  # Allow all domains, or specify: ["company.com", "example.org"]
+
+# Cookie Configuration
+cookie_name = "_oauth2_proxy_tarsy"
+cookie_secret = "your_32_char_cookie_secret_here"
+cookie_secure = false  # Set to true for HTTPS
+cookie_httponly = true
+cookie_expire = "1h"
+
+# Skip Authentication for Public Endpoints
+skip_auth_regex = [
+    "^/health",
+    "^/metrics",
+    "^/\\.well-known",
+    "^/docs",
+    "^/$"
+]
+
+# Skip Provider Check (for testing)
+skip_provider_check = false
+
+# Logging
+request_logging = true
+standard_logging = true
+auth_logging = true
+
+# Headers
+pass_basic_auth = false
+pass_access_token = true
+pass_user_headers = true
+set_authorization_header = true
+set_xauthrequest = true
+
+# TLS Configuration
+tls_cert_file = ""
+tls_key_file = ""
+
+# Security
+ssl_insecure_skip_verify = false
+
+# Session Configuration
+session_store_type = "cookie"
+
+# Custom Headers
+set_authorization_header = true
+prefer_email_to_user = true
+
+# Upstream Headers
+pass_host_header = true
+
+# Error Pages
+custom_templates_dir = ""
+
+# Metrics
+metrics_address = "127.0.0.1:9090"
+
+# Provider Specific Settings
+# For Google:
+# scope = "openid email profile"
+
+# For Azure AD:
+# azure_tenant = "your-tenant-id"
+# scope = "openid email profile"
+
+# For GitHub:
+# github_org = "your-org"
+# github_team = "your-team"
+
+# For GitLab:
+# gitlab_group = "your-group"
+
+# Advanced Configuration
+flush_interval = "1s"
+banner = ""
+footer = ""

@@ -1,0 +1,32 @@
+# TARSy Go Bot Configuration with MCP Integration
+# Note: This config extends the built-in hardcoded agents
+
+# =============================================================================
+# MCP SERVER CONFIGURATIONS
+# =============================================================================
+mcp_servers:
+  devsandbox-mcp:
+    name: "devsandbox-mcp"
+    command: "/home/fmehta/Projects/go/src/github.com/codeready/mcp-server-devsandbox/bin/mcp-server-devsandbox"
+    args: 
+      - "--transport=stdio"
+      - "--toolchain-host-namespace=toolchain-host-operator"
+      - "--oc-path=/usr/local/bin/oc"
+      - "--kubeconfig=/home/fmehta/Projects/go/src/github.com/codeready/mcp-prod-SA-kubeconfig.txt"
+    env:
+      TOOLCHAIN_HOST_NAMESPACE: "toolchain-host-operator"
+    enabled: true
+    auto_start: true
+
+# =============================================================================
+# AGENT CONFIGURATIONS
+# Note: For now, we'll use the built-in hardcoded agents with MCP servers
+# configured separately. The Go implementation doesn't fully support
+# configured agents yet, but MCP servers can still be used by hardcoded agents.
+# =============================================================================
+agents: {}
+
+# =============================================================================
+# AGENT CHAIN CONFIGURATIONS
+# =============================================================================
+agent_chains: {}
